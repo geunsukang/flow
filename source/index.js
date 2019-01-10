@@ -149,9 +149,142 @@ exports.install = function(options) {
 	ON('service', FN.service);
 
 	// Repository according "index" of cluster instance
-	if (F.isCluster)
+	if (F.isCluster){
 		FILEINMEMORY = FILEINMEMORY.replace('.json', F.id + '.json');
+		F.on('Flow.Cluster.Save', function(message){
+			if(message.type == "apply"){
+				var arr = message.body;
+				var add = [];
+				var rem = [];
+				var refreshconn = false;
 
+				arr.forEach(function(c) {
+					if (c.type === 'add') {
+						add.push(c.com);
+					} else if (c.type === 'rem') {
+						rem.push({ id: c.id });
+					} else if (c.type === 'mov') {
+						change_move(c.com);
+					} else if( c.type === 'conn') {
+						change_connections(c.id, c.conn);
+					} else if( c.type === 'tabs') {
+						MESSAGE_DESIGNER.tabs = c.tabs;
+					}
+				});
+
+				FLOW.reset(rem, function(){
+					FLOW.init(add, function(){
+						FLOW.designer();
+					});
+				});
+
+				refreshconn && FLOW.refresh_connections();
+			}else if (message.target && message.type === 'options') {
+
+				var tmp = FLOW.instances[message.target];
+				if (!tmp)
+					return;
+
+				var instance = FLOW.instances[message.target];
+				if (!instance)
+					return;
+
+				var old_options = instance.options;
+				instance.options = message.body;
+
+				var options = instance.options;
+
+				instance.name = options.comname || '';
+				instance.reference = options.comreference;
+
+				if (options.comcolor != undefined)
+					instance.color = options.comcolor;
+
+				if (options.comnotes !== undefined)
+					instance.notes = options.comnotes;
+
+				options.comname = undefined;
+				options.comreference = undefined;
+				options.comcolor = undefined;
+				options.comnotes = undefined;
+
+				var count;
+				var tmpcount;
+				var refreshconn = false;
+
+				if (options.comoutput != null) {
+					count = instance.output instanceof Array ? instance.output.length : instance.output;
+					tmpcount = io_count(options.comoutput);
+					tmpcount !== count && Object.keys(instance.connections).forEach(function(key) {
+						var index = +key;
+						if (index >= tmpcount) {
+							delete instance.connections[key];
+							refreshconn = true;
+						}
+					});
+					instance.output = options.comoutput;
+				}
+
+				if (options.cominput != null) {
+					count = instance.input instanceof Array ? instance.input.length : instance.input;
+					tmpcount = io_count(options.cominput);
+					tmpcount !== count && Object.keys(FLOW.instances).forEach(function(id) {
+
+						if (id === instance.id)
+							return;
+
+						var item = FLOW.instances[id];
+						var can = false;
+
+						Object.keys(item.connections).forEach(function(key) {
+							var l = item.connections[key].length;
+							item.connections[key] = item.connections[key].remove(function(item) {
+								return item.id === instance.id && (+item.index) >= tmpcount;
+							});
+							if (l !== item.connections[key].length)
+								can = true;
+							!item.connections[key].length && (delete instance.connections[key]);
+						});
+
+						if (can) {
+							var tmp = FLOW.instances[item.id];
+							tmp.connections = item.connections;
+							refreshconn = true;
+						}
+					});
+					instance.input = options.cominput;
+				}
+
+				options.comoutput = undefined;
+				options.cominput = undefined;
+
+				instance.$refresh();
+				instance.$events.options && instance.emit('options', instance.options, old_options);
+				EMIT('flow.options', instance);
+
+				tmp.options = instance.options;
+				tmp.name = instance.name;
+				tmp.output = instance.output;
+				tmp.input = instance.input;
+				tmp.connections = instance.connections;
+				tmp.reference = instance.reference;
+				tmp.color = instance.color;
+				tmp.notes = instance.notes;
+
+				refreshconn && FLOW.refresh_connections();
+				OPT.logging && FLOW.log('options', instance, client);
+				FLOW.designer();
+			}else if (message.target && message.type === 'updates'){
+				var tmp = FLOW.instances[message.target];
+				if (tmp) {
+					tmp.options = message.body;
+					FLOW.cleaner();
+					FLOW.refresh_connections();
+					FLOW.designer();
+				}
+			}
+		});
+	}
 	// Load flow's data
 	if (TYPE !== 2) {
 		setTimeout(function() {
@@ -328,7 +461,6 @@ FN.websocket = function() {
 	});
 
 	self.on('message', function(client, message) {
-
 		var component;
 
 		if (message.type === 'readme') {
@@ -452,7 +584,9 @@ FN.websocket = function() {
 			}
 
 			if (message.type === 'options') {
-
+				if(F.isCluster){
+					F.cluster.emit('Flow.Cluster.Save', message);
+				}
 				var tmp = FLOW.instances[message.target];
 
 				// Component doesn't exist
@@ -570,7 +704,11 @@ FN.websocket = function() {
 		}
 
 		if (message.type === 'apply') {
+			if(F.isCluster){
+				F.cluster.emit('Flow.Cluster.Save', message);
+			}
 			FLOW.changes(message.body);
+			FLOW.designer();
 			OPT.logging && FLOW.log('apply', null, client);
 		}
 	});
@@ -1094,6 +1232,9 @@ Component.prototype.save = function() {
 	var tmp = FLOW.instances[this.id];
 	if (tmp) {
 		tmp.options = this.options;
+		if(F.isCluster){
+			F.cluster.emit('Flow.Cluster.Save', {target:tmp.id, type:'updates', body:tmp.options});
+		}
 		FLOW.save3();
 	}
 
@@ -1638,7 +1779,6 @@ FLOW.save2 = function(callback) {
 	data.variables = FLOW.$variables;
 
 	var json = JSON.stringify(data, (k,v) => k === '$component' ? undefined : v);
-
 	Fs.writeFile(F.path.root(FILEDESIGNER), json, function(err) {
 		err && F.error(err, 'FLOW.save()');
 		callback && callback();
